@@ -18,7 +18,7 @@ Windows PCs to connect out to with FreeRDP.
   backend.py host-save                    add/update a saved computer from stdin JSON
   backend.py host-remove <id>
   backend.py host-connect <id>
-  backend.py uninstall                    stop everything and remove what setup installed
+  backend.py uninstall [--dry-run]        stop everything and remove what setup installed
   backend.py event <rdp-start|rdp-end|rdp-stopped>  hypr-rdp session hooks
   backend.py watchdog                     undo the privacy lock if a session dies uncleanly
 
@@ -997,7 +997,10 @@ def cmd_watchdog():
     """Runs for the length of an RDP session. Keeps the lid, idle and sleep from
     cutting it off, and undoes the session changes if it ends without hypr-rdp's
     end hook (crash, killed service, dropped network)."""
+    import signal
     import time
+    # Stopping the watchdog must still release the lid/sleep inhibitor (finally below).
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     cfg = load_config()
     inhibitor = None
     if shutil.which("systemd-inhibit"):
@@ -1033,7 +1036,37 @@ def cmd_watchdog():
     return 0
 
 
-def cmd_uninstall():
+def uninstall_plan():
+    """What uninstall removes, for --dry-run."""
+    cfg = load_config()
+    plan = []
+    for unit in UNITS.values():
+        if os.path.exists(os.path.join(UNIT_DIR, unit)):
+            plan.append("service %s (stopped and removed)" % unit)
+    tagged = [dict(t) for t in sorted({(("iface", r["iface"]), ("port", r["port"]))
+                                       for r in ufw_tuples() if r["comment"] == FIREWALL_TAG})]  # v4 + v6 once
+    if tagged:
+        plan.append("%d firewall rule(s): %s" % (len(tagged), ", ".join("%s port %s" % (r["iface"], r["port"]) for r in tagged)))
+    if os.path.exists(SSHD_DROPIN):
+        plan.append("SSH settings %s (and the SSH server is turned off)" % SSHD_DROPIN)
+    if helper_state() != "missing":
+        plan.append("helper %s and its polkit rule" % HELPER)
+    if cfg["unlock"].get("enabled") or cfg["unlock"].get("registered"):
+        plan.append("remote unlock: boot entry, boot image, Wi-Fi key and Tailscale boot device files")
+    for host in cfg.get("hosts", []):
+        if keyring_get(host["id"]):
+            plan.append("saved password for %s (keyring)" % host["name"])
+    if os.path.isdir(STATE_DIR):
+        plan.append("settings, passwords and certificate in %s" % STATE_DIR)
+    return plan
+
+
+def cmd_uninstall(dry_run=False):
+    if dry_run:
+        for item in uninstall_plan():
+            print("WOULD REMOVE", item, flush=True)
+        say("OK", "Dry run: nothing was changed")
+        return 0
     session_end()
     for unit in UNITS.values():
         run("systemctl", "--user", "disable", "--now", unit)
@@ -1108,7 +1141,7 @@ def main(argv):
     if cmd == "watchdog":
         return cmd_watchdog()
     if cmd == "uninstall":
-        return cmd_uninstall()
+        return cmd_uninstall(dry_run="--dry-run" in args)
     print(__doc__.split("\n\n")[2], file=sys.stderr)
     return 2
 

@@ -151,6 +151,7 @@ expires. Your disk password is never stored.
 ## Remove
 
 ```sh
+~/.config/omarchy/plugins/cikr-repos.remote-access/backend.py uninstall --dry-run   # see what will be removed
 ~/.config/omarchy/plugins/cikr-repos.remote-access/backend.py uninstall
 omarchy plugin remove cikr-repos.remote-access
 ```
