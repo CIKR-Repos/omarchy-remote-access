@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "cikr-repos.remote-access",
+  "name": "Remote Access",
+  "version": "0.1.0",
+  "author": "CIKR",
+  "license": "MIT",
+  "description": "Reach this desktop over RDP, VNC and SSH on the networks you choose (Tailscale by default), and connect out to Windows PCs, Macs and servers.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Remote Access",
+    "description": "Turn RDP, VNC and SSH access on and off, see who is connected, and open saved computers.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
