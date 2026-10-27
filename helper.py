@@ -350,10 +350,11 @@ def wifi_config():
     psk = run("nmcli", "-s", "-g", "802-11-wireless-security.psk", "connection", "show", conn).stdout.strip()
     if not psk:
         return "Only WPA password networks are supported at boot"
-    derived = run("wpa_passphrase", ssid, psk)
+    # The passphrase goes on stdin: on the command line other users could read it.
+    derived = run("wpa_passphrase", ssid, input=psk + "\n")
     if derived.returncode != 0:
         return "Could not prepare the Wi-Fi settings"
-    body = "\n".join(l for l in derived.stdout.splitlines() if not l.strip().startswith("#psk="))
+    body = "\n".join(l for l in derived.stdout.splitlines() if not l.strip().startswith("#"))
     os.makedirs("/etc/wpa_supplicant", exist_ok=True)
     fd = os.open(WIFI_CONF, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:

@@ -52,8 +52,8 @@ an employer's network.
 - **This computer locks itself** (Settings, on by default). Its screens stay
   off and its keyboard, touchpad, mouse and touchscreen are disabled while
   you're connected. When the session ends, Omarchy locks, and the screens come
-  back showing the lock screen. USB keyboards you plug in and the power button
-  always work.
+  back showing the lock screen. A keyboard or mouse plugged in during the
+  session is turned off within a second too. The power button always works.
 - **Nothing cuts the session off.** Closing the lid, idling and sleep are held
   off until you disconnect.
 - **One session at a time.** A new login replaces the current one.
@@ -98,8 +98,8 @@ Pis (VNC), or servers (SSH), and connect in one click.
   external monitors), and **send Super shortcuts to the PC**. Off by default,
   so Omarchy's shortcuts still move and resize the window.
 - **Passwords** are optional and kept in your **desktop keyring**, never in
-  the plugin's files. FreeRDP hides them from the process list. Leave the
-  field empty and FreeRDP asks when you connect.
+  the plugin's files. They reach FreeRDP on stdin, never on a command line.
+  Leave the field empty and FreeRDP asks when you connect.
 - If a connection fails, a notification says why: wrong password (on Windows
   with a Microsoft account, use the account password, not the PIN), Remote
   Desktop off, unreachable, and so on.

@@ -74,7 +74,11 @@ Panel {
   }
 
   function copy(text) {
-    Quickshell.execDetached(["wl-copy", text])
+    // Through stdin: a password in wl-copy's arguments would be readable by other users.
+    if (copyProc.running) return
+    copyProc.text = text
+    copyProc.stdinEnabled = true
+    copyProc.running = true
     message = "Copied"
     failed = false
   }
@@ -188,6 +192,17 @@ Panel {
     id: vncPasswordProc
     command: [root.backend, "get-password", "vnc"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: vncPassword.text = text.trim() }
+  }
+
+  Process {
+    id: copyProc
+    property string text: ""
+    command: ["wl-copy"]
+    onStarted: {
+      write(text)
+      text = ""
+      stdinEnabled = false  // closes stdin, so wl-copy takes what was written
+    }
   }
 
   Process {

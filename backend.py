@@ -86,6 +86,7 @@ DEFAULTS = {
 }
 
 IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
+HOST_ID_RE = re.compile(r"^[0-9a-f]{8}$")  # saved computer ids name log files
 
 
 def say(kind, text):
@@ -216,8 +217,11 @@ def networks(cfg):
 
 
 def firewall_active():
-    # ufw's own state file is readable without root.
-    return "ENABLED=yes" in read("/etc/ufw/ufw.conf") and run("systemctl", "is-active", "ufw").stdout.strip() == "active"
+    """ufw is on and drops what it doesn't allow (its state files are readable without root).
+    Only then do the services listen on every address and rely on per-network rules."""
+    policy = re.search(r'^DEFAULT_INPUT_POLICY="?(\w+)', read("/etc/default/ufw"), re.M)
+    return ("ENABLED=yes" in read("/etc/ufw/ufw.conf") and bool(policy) and policy.group(1) in ("DROP", "REJECT")
+            and run("systemctl", "is-active", "ufw").stdout.strip() == "active")
 
 
 def ufw_tuples():
@@ -708,7 +712,8 @@ def cmd_host_save():
         say("ERROR", "bad host")
         return 1
     address = str(host.get("host", "")).strip()
-    if not re.match(r"^[A-Za-z0-9.:\[\]_-]{1,253}$", address):
+    # Never starting with "-", so it can't be read as a client option.
+    if not re.match(r"^[A-Za-z0-9.:\[\]_][A-Za-z0-9.:\[\]_-]{0,252}$", address):
         say("ERROR", "Enter the PC's name or address")
         return 1
     protocol = host.get("protocol", "rdp")
@@ -720,7 +725,7 @@ def cmd_host_save():
         say("ERROR", "The port must be a number")
         return 1
     entry = {
-        "id": host.get("id") or uuid.uuid4().hex[:8],
+        "id": host.get("id") if HOST_ID_RE.match(str(host.get("id", ""))) else uuid.uuid4().hex[:8],
         "protocol": protocol,
         "port": port,
         "name": str(host.get("name", "")).strip()[:60] or address,
@@ -747,6 +752,9 @@ def cmd_host_save():
 
 
 def cmd_host_remove(host_id):
+    if not HOST_ID_RE.match(host_id):
+        say("ERROR", "Unknown computer")
+        return 1
     keyring_clear(host_id)
     cfg = load_config()
     cfg["hosts"] = [h for h in cfg["hosts"] if h["id"] != host_id]
@@ -776,10 +784,10 @@ def connect_command(host):
             cmd.append("-grab-keyboard")
         if host["username"]:
             cmd.append("/u:%s" % host["username"])
-        password = keyring_get(host["id"])
-        if password:
-            # FreeRDP blanks this out of its process list as soon as it starts.
-            cmd.append("/p:%s" % password)
+        if keyring_get(host["id"]):
+            # The saved password goes to FreeRDP on stdin (see cmd_watch_connection),
+            # never on its command line, where other users could read it.
+            cmd.append("/from-stdin:force")
         if host["domain"]:
             cmd.append("/d:%s" % host["domain"])
         else:
@@ -792,8 +800,8 @@ def connect_command(host):
         if not shutil.which("vncviewer"):
             return None, "A VNC viewer is not installed (omarchy pkg add tigervnc)"
         return ["vncviewer", "%s::%s" % (address, port or "5900")], None
-    target = ("%s@%s" % (host["username"], address)) if host["username"] else address
-    ssh = ["ssh", target] + (["-p", port] if port else [])
+    ssh = ["ssh"] + (["-p", port] if port else []) + (["-l", host["username"]] if host["username"] else [])
+    ssh += ["--", address]
     return ["xdg-terminal-exec", "--title=%s" % host["name"]] + ssh, None
 
 
@@ -863,13 +871,20 @@ def keep_dialogs_on_screen(proc, session_title, seconds=180):
 
 
 def cmd_watch_connection(host_id):
+    if not HOST_ID_RE.match(host_id):
+        return 1
     host = next((h for h in load_config()["hosts"] if h["id"] == host_id), None)
     cmd, error = connect_command(host) if host else (None, "unknown computer")
     if error:
         return 1
     log_file = path("connect-%s.log" % host_id)
-    with open(log_file, "w") as log:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+    password = keyring_get(host_id) if "/from-stdin:force" in cmd else ""
+    with os.fdopen(os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as log:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if password else subprocess.DEVNULL,
+                                stdout=log, stderr=subprocess.STDOUT, text=True)
+        if password:
+            proc.stdin.write(password + "\n")
+            proc.stdin.close()
         keep_dialogs_on_screen(proc, host["name"])
         code = proc.wait()
     if code == 0:
@@ -976,6 +991,10 @@ def session_end():
     for monitor, ws_id in state.get("active", {}).items():
         if monitor in present and isinstance(ws_id, int):
             hypr_lua('hl.dispatch(hl.dsp.focus({ workspace = "%d" }))' % ws_id)
+    if state.get("lock"):
+        # Lock before local input and the screens come back, so nobody at this
+        # computer ever reaches the unlocked desktop.
+        run("omarchy-shell", "lock", "lock")
     for name in state.get("devices", []):
         if LUA_NAME_RE.match(name):
             hypr_lua('hl.device({ name = "%s", enabled = true })' % name)
@@ -983,9 +1002,6 @@ def session_end():
     hypr_lua("hl.config({ misc = { key_press_enables_dpms = %s, mouse_move_enables_dpms = %s } })" % (
         "true" if wake.get("key_press_enables_dpms", True) else "false",
         "true" if wake.get("mouse_move_enables_dpms", True) else "false"))
-    if state.get("lock"):
-        # Lock before the screens come back, so the lock screen is the first thing shown.
-        run("omarchy-shell", "lock", "lock")
     for name in state.get("outputs", []):
         if LUA_NAME_RE.match(name):
             hypr_lua('hl.dispatch(hl.dsp.dpms({ action = "on", monitor = "%s" }))' % name)
@@ -1010,16 +1026,33 @@ def cmd_watchdog():
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     misses = 0
     try:
+        tick = 0
         while os.path.exists(path(SESSION)):
-            time.sleep(5)
+            time.sleep(1)
+            tick += 1
+            try:
+                with open(path(SESSION)) as f:
+                    state = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if state.get("lock"):
+                # A keyboard or mouse plugged in during the session is turned off too,
+                # and back on when the session ends.
+                new = [n for n in physical_inputs() if n not in state["devices"]]
+                if new:
+                    state["devices"] += new
+                    write_private(SESSION, json.dumps(state))
+                    for name in new:
+                        hypr_lua('hl.device({ name = "%s", enabled = false })' % name)
+            if tick % 5:
+                continue
             # Unlocking the lock screen from the client turns every screen on;
             # keep this computer's screens dark for the rest of the session.
             try:
-                with open(path(SESSION)) as f:
-                    blank = set(json.load(f).get("outputs", []))
+                blank = set(state.get("outputs", []))
                 lit = [m["name"] for m in json.loads(run("hyprctl", "monitors", "-j").stdout)
                        if m["name"] in blank and m.get("dpmsStatus")]
-            except (OSError, ValueError):
+            except ValueError:
                 lit = []
             for name in lit:
                 if LUA_NAME_RE.match(name):
@@ -1108,6 +1141,7 @@ def cmd_event(event):
 
 def main(argv):
     cmd, args = (argv[0] if argv else ""), argv[1:]
+    os.umask(0o077)
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
     if cmd == "status":
         return cmd_status()
