@@ -110,6 +110,8 @@ run_cleanuphook() {
 '''
 
 IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
+# Client VPN tunnels (Cisco, OpenVPN, vpnc, PPP) are usually an employer's network.
+CLIENT_VPN_PREFIXES = ("tun", "tap", "cscotun", "vpn", "ppp")
 USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
@@ -135,9 +137,19 @@ def checked_user(name):
     if not name or not USER_RE.match(name):
         raise SystemExit(say("ERROR", "bad user name") or 1)
     try:
-        return pwd.getpwnam(name)
+        user = pwd.getpwnam(name)
     except KeyError:
         raise SystemExit(say("ERROR", "no such user") or 1)
+    # Through pkexec, only the user who called it.
+    caller = os.environ.get("PKEXEC_UID")
+    if caller is not None and str(user.pw_uid) != caller:
+        raise SystemExit(say("ERROR", "user does not match the caller") or 1)
+    return user
+
+
+def allowed_port(port):
+    """SSH, or an unprivileged port: never a port of another root-owned service."""
+    return port == 22 or 1024 <= port < 65536
 
 
 def sha256(path):
@@ -251,11 +263,12 @@ def cmd_firewall(argv):
         value = next(it, "")
         if a == "--rule":
             iface, _, port = value.partition(":")
-            if not IFACE_RE.match(iface) or not port.isdigit() or not 0 < int(port) < 65536:
+            if not IFACE_RE.match(iface) or iface.startswith(CLIENT_VPN_PREFIXES) \
+                    or not port.isdigit() or not allowed_port(int(port)):
                 say("ERROR", "bad rule %r" % value)
                 return 1
             rules.append((iface, int(port)))
-        elif a == "--close-open" and value.isdigit():
+        elif a == "--close-open" and value.isdigit() and allowed_port(int(value)):
             close_open.append(int(value))
         else:
             say("ERROR", "bad argument %r" % a)
@@ -486,6 +499,10 @@ def main(argv):
         print(VERSION)
         return 0
     if cmd == "setup":
+        # The installed copy runs without a password, so it must never replace itself.
+        if os.path.realpath(__file__) == INSTALLED:
+            say("ERROR", "run setup from the plugin (it asks for your password)")
+            return 1
         args = dict(zip(argv[1::2], argv[2::2]))
         return cmd_setup(args)
     if cmd == "firewall":

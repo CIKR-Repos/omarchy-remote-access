@@ -20,6 +20,10 @@ password **once** and:
   unlock tools;
 - installs a small root-owned helper with a polkit rule, so after setup the
   firewall and SSH server follow your switches **without asking again**.
+  The helper can only open RDP/VNC/SSH ports (22 or 1024 and up) on the
+  networks you chose, never on a client VPN, and only for your own user. It
+  can't update itself: after a plugin update, **Set up** asks for your
+  password again.
 
 Setup is safe to run again. Anything already installed is skipped.
 
