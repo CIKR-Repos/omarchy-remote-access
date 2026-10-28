@@ -26,6 +26,9 @@ Panel {
   property string loginLink: ""
   property bool showRdpPassword: false
   property bool showVncPassword: false
+  // What's saved, so the Save buttons know when a box has been edited.
+  property string rdpSaved: ""
+  property string vncSaved: ""
 
   readonly property string backend: Qt.resolvedUrl("backend.py").toString().replace("file://", "")
   readonly property bool busy: actionProc.running
@@ -81,6 +84,17 @@ Panel {
     copyProc.running = true
     message = "Copied"
     failed = false
+  }
+
+  function savePassword(service, text) {
+    if (text.length < 8) {
+      message = "Use at least 8 characters"
+      failed = true
+      return
+    }
+    run(["password", service], text)
+    // Hand the keys back to the panel (Esc, Tab), which typing in the box had paused.
+    keyCatcher.forceActiveFocus()
   }
 
   function serviceDescription(key) {
@@ -185,13 +199,14 @@ Panel {
   Process {
     id: rdpPasswordProc
     command: [root.backend, "get-password", "rdp"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: rdpPassword.text = text.trim() }
+    // Keeps a password you're still typing; only an unedited box follows the saved one.
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { if (rdpPassword.text === root.rdpSaved) rdpPassword.text = text.trim(); root.rdpSaved = text.trim() } }
   }
 
   Process {
     id: vncPasswordProc
     command: [root.backend, "get-password", "vnc"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: vncPassword.text = text.trim() }
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { if (vncPassword.text === root.vncSaved) vncPassword.text = text.trim(); root.vncSaved = text.trim() } }
   }
 
   Process {
@@ -301,7 +316,8 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: root.tab !== "this" || root.editingHost
+      // Off while typing a password, or it would take Enter, Space and h/j/k/l/x.
+      blocked: root.tab !== "this" || root.editingHost || rdpPassword.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
@@ -458,11 +474,22 @@ Panel {
               }
               TextField {
                 id: rdpPassword
-                width: parent.width - Style.space(96) - rdpEye.width - rdpCopy.width - rdpNew.width - Style.space(32)
+                width: parent.width - Style.space(96) - rdpSave.width - rdpEye.width - rdpCopy.width - rdpNew.width - Style.space(40)
                 password: !root.showRdpPassword
                 foreground: root.foreground
                 font.family: root.fontFamily
-                onAccepted: if (text.length >= 8) root.run(["password", "rdp"], text)
+                placeholderText: "Type your own, or press New"
+                onAccepted: root.savePassword("rdp", text)
+              }
+              // "Saved" while the box matches the stored password; "Save" once you type your own.
+              Button {
+                id: rdpSave
+                text: rdpPassword.text === root.rdpSaved && root.rdpSaved !== "" ? "Saved" : "Save"
+                enabled: rdpPassword.text !== root.rdpSaved
+                opacity: enabled ? 1 : 0.5
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.savePassword("rdp", rdpPassword.text)
               }
               Button { id: rdpEye; text: root.showRdpPassword ? "Hide" : "Show"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.showRdpPassword = !root.showRdpPassword }
               Button { id: rdpCopy; text: "Copy"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.copy(rdpPassword.text) }
@@ -726,12 +753,21 @@ Panel {
               spacing: Style.space(8)
               TextField {
                 id: vncPassword
-                width: parent.width - vncEye.width - vncNew.width - Style.space(16)
+                width: parent.width - vncSave.width - vncEye.width - vncNew.width - Style.space(24)
                 password: !root.showVncPassword
-                placeholderText: "VNC password"
+                placeholderText: "VNC password: type your own, or press New"
                 foreground: root.foreground
                 font.family: root.fontFamily
-                onAccepted: if (text.length >= 8) root.run(["password", "vnc"], text)
+                onAccepted: root.savePassword("vnc", text)
+              }
+              Button {
+                id: vncSave
+                text: vncPassword.text === root.vncSaved && root.vncSaved !== "" ? "Saved" : "Save"
+                enabled: vncPassword.text !== root.vncSaved
+                opacity: enabled ? 1 : 0.5
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.savePassword("vnc", vncPassword.text)
               }
               Button { id: vncEye; text: root.showVncPassword ? "Hide" : "Show"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.showVncPassword = !root.showVncPassword }
               Button { id: vncNew; text: "New"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: { root.showVncPassword = true; root.run(["generate-password", "vnc"]) } }
