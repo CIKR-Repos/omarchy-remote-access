@@ -56,6 +56,7 @@ HELPER = "/usr/local/lib/omarchy-remote-access/helper.py"
 PLUGIN_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "helper.py")
 UFW_RULES = ("/etc/ufw/user.rules", "/etc/ufw/user6.rules")
 HEADLESS_OUTPUT = "hypr-rdp"
+RDP_SERVER_BUILD = "0.1.7-1.1"  # the pkgrel helper.py builds hypr-rdp with
 # Which client key acts as Super (Omarchy's main modifier) in an RDP session. hypr-rdp
 # builds the remote keyboard's keymap without XKB options, so libxkbcommon takes them
 # from XKB_DEFAULT_OPTIONS: only the remote keyboard changes, never the local one.
@@ -144,10 +145,9 @@ def save_config(cfg):
 # ---- environment ---------------------------------------------------------------
 
 def rdp_server_current():
-    """hypr-rdp 0.1.7 or newer (older versions crash when a client resizes)."""
-    res = run("hypr-rdp", "--version") if shutil.which("hypr-rdp") else None
-    m = re.search(r"(\d+)\.(\d+)\.(\d+)", res.stdout if res else "")
-    return bool(m) and tuple(int(x) for x in m.groups()) >= (0, 1, 7)
+    """Exactly the hypr-rdp build setup makes, with its frame-size limit. Any other
+    build, older or newer, lacks the patch, so setup has to run again."""
+    return run("pacman", "-Q", "hypr-rdp").stdout.split() == ["hypr-rdp", RDP_SERVER_BUILD]
 
 
 def missing_packages():
@@ -353,7 +353,9 @@ def write_units(cfg):
     # Workspaces go home before the virtual screen is removed; on start, any that
     # Hyprland parked on the new virtual screen are sent back.
     xkb = SUPER_KEYS.get(cfg["rdp"].get("super_key", "command"), "")
-    rdp = base % ("RDP server", ("Environment=XKB_DEFAULT_OPTIONS=%s\n" % xkb if xkb else "") +
+    # A cap on what the server can take, should a client ever make it grow.
+    limits = "MemoryMax=2G\nMemorySwapMax=0\n"
+    rdp = base % ("RDP server", limits + ("Environment=XKB_DEFAULT_OPTIONS=%s\n" % xkb if xkb else "") +
                   "ExecStart=/usr/bin/hypr-rdp --config %s\n"
                   "ExecStartPost=-/bin/sh -c 'sleep 2; exec %s event rdp-ready'\n"
                   "ExecStopPost=-%s event rdp-stopped\n"
@@ -433,6 +435,14 @@ def helper_state():
         return "missing"
 
 
+def setup_state():
+    """Like helper_state, but also outdated when hypr-rdp isn't the build setup makes."""
+    if missing_packages():
+        return "missing"
+    state = helper_state()
+    return "outdated" if state == "ready" and not rdp_server_current() else state
+
+
 def helper(*args, relay=False):
     """Run the installed helper through pkexec (no password after setup).
     relay=True passes its progress lines through to the panel. Returns (ok, last line)."""
@@ -496,7 +506,9 @@ def cmd_setup():
         print(last or "ERROR Setup failed", flush=True)
         return 1
     cfg = load_config()
-    error = sync_system(cfg)
+    # Rewrite the units and restart what's on, so a rebuilt server and new unit
+    # settings take effect now rather than at the next settings change.
+    error = sync_system(cfg) or apply_services(cfg)
     say("ERROR" if error else "OK", error or "All set")
     return 1 if error else 0
 
@@ -556,7 +568,7 @@ def cmd_status():
         "firewall": firewall_active(),
         "openRules": open_rules(cfg),
         "systemInSync": system_in_sync(cfg, nets),
-        "setup": helper_state() if rdp_server_current() and not missing_packages() else "missing",
+        "setup": setup_state(),
         "allow": cfg.get("allow", True),
         "unlock": {**cfg["unlock"], "hostname": "%s-initrd" % os.uname().nodename},
         "fingerprint": fingerprint(),

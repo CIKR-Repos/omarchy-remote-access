@@ -15,6 +15,7 @@ commands below, and every argument is checked.
 
 Progress lines: "STEP <text>", "LINK <url>", "OK <text>", "ERROR <text>".
 """
+import glob
 import grp
 import hashlib
 import json
@@ -39,14 +40,46 @@ REPO_PACKAGES = ["wayvnc", "openssh", "ufw", "freerdp", "wpa_supplicant", "tails
                  # hypr-rdp's dependencies and build tools
                  "pam", "fuse3", "libpulse", "libva", "libxkbcommon", "mesa", "pipewire", "wayland",
                  "cargo", "clang", "cmake", "git", "base-devel"]
-# AUR packages, pinned to a reviewed commit and PKGBUILD.
+# IronRDP's frame reader (used by hypr-rdp) keeps buffering while a parser says it
+# needs more data, with no limit, so a peer could grow it before authenticating. RDP
+# and CredSSP frames carry 16-bit lengths; 1 MiB leaves ample room.
+FRAMED_LIMIT = (
+    "use tracing::{debug, trace};\n",
+    "use tracing::{debug, trace};\n\n"
+    "/// Most bytes a reader buffers while waiting for one frame.\n"
+    "const MAX_BUFFERED_BYTES: usize = 1 << 20;\n",
+)
+FRAMED_READ_EXACT = (
+    "    pub(crate) async fn read_exact(&mut self, length: usize) -> io::Result<BytesMut> {\n",
+    "    pub(crate) async fn read_exact(&mut self, length: usize) -> io::Result<BytesMut> {\n"
+    "        if length > MAX_BUFFERED_BYTES {\n"
+    "            return Err(io::Error::new(io::ErrorKind::InvalidData, \"frame too large\"));\n"
+    "        }\n",
+)
+FRAMED_READ = (
+    "    async fn read(&mut self) -> io::Result<usize> {\n",
+    "    async fn read(&mut self) -> io::Result<usize> {\n"
+    "        if self.buf.len() >= MAX_BUFFERED_BYTES {\n"
+    "            return Err(io::Error::new(io::ErrorKind::InvalidData, \"frame too large\"));\n"
+    "        }\n",
+)
+IRONRDP_PATCH = {
+    "checkout": "git/checkouts/ironrdp-*/3db08ba/crates/ironrdp-async/src/framed.rs",
+    "sha256": "c6eb3300b462f558ece2500ee840a50dbfff79937d4c773341e860fb551dcdd6",
+    "patched_sha256": "e7ab60e7cbaece089d749e99dd905f6307f5e0e5859dcaec555ed8a1563fef10",
+    "edits": [FRAMED_LIMIT, FRAMED_READ_EXACT, FRAMED_READ],
+}
+
+# AUR packages, pinned to a reviewed commit and PKGBUILD. A package with source
+# patches is built with its own pkgrel, so an unpatched build is replaced.
 AUR_PACKAGES = [
     {"name": "hypr-rdp", "version": "0.1.7", "commit": "25a9457285b37bb859bc6939c7731bf020d531e8",
      "pkgbuild_sha256": "3e218e06f1a469cb5d8886a0544fb4dba567e447887b30c9e045c45842ff8c1d",
-     "replaces": ["omarchy-remote-desktop-backend"]},
+     "pkgrel": "1.1", "patches": [IRONRDP_PATCH],
+     "replaces": ["omarchy-remote-desktop-backend", "hypr-rdp-git", "hypr-rdp-bin"]},
     {"name": "mkinitcpio-tailscale", "version": "2.10.1", "commit": "cc287ad1bda2622e850f71abe38b1addc6563acb",
      "pkgbuild_sha256": "714ada455460301630ab9b6ad8e625eed44e8fb829e261f3937ec117d120dcfd",
-     "replaces": []},
+     "pkgrel": "", "patches": [], "replaces": []},
 ]
 
 # Remote disk unlock: a separate boot entry whose image adds Wi-Fi, DHCP and Tailscale
@@ -159,14 +192,70 @@ def sha256(path):
 
 # ---- setup ----------------------------------------------------------------------
 
-def build_aur(pkg, user):
-    """Build a pinned AUR package as the desktop user and install it."""
+def as_user_call(user, fn, *args):
+    """Run fn(*args) in a child with the user's identity, for files the user owns."""
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setgroups([])
+            os.setgid(user.pw_gid)
+            os.setuid(user.pw_uid)
+            os._exit(0 if fn(*args) else 1)
+        except BaseException:
+            os._exit(1)
+    return os.waitpid(pid, 0)[1] == 0
+
+
+def set_pkgrel(pkgbuild, pkgrel):
+    with open(pkgbuild) as f:
+        text, count = re.subn(r"(?m)^pkgrel=.*$", "pkgrel=%s" % pkgrel, f.read(), count=1)
+    if count != 1:
+        return False
+    with open(pkgbuild, "w") as f:
+        f.write(text)
+    return True
+
+
+def apply_patch(patch, cargo_home):
+    """Edit one fetched dependency file, checking it before and after."""
+    found = glob.glob(os.path.join(cargo_home, patch["checkout"]))
+    if len(found) != 1:
+        return False
+    with open(found[0], "rb") as f:
+        data = f.read()
+    if hashlib.sha256(data).hexdigest() != patch["sha256"]:
+        return False
+    text = data.decode("utf-8")
+    for old, new in patch["edits"]:
+        if text.count(old) != 1:
+            return False
+        text = text.replace(old, new)
+    data = text.encode("utf-8")
+    if hashlib.sha256(data).hexdigest() != patch["patched_sha256"]:
+        return False
+    with open(found[0], "wb") as f:
+        f.write(data)
+    return True
+
+
+def installed(pkg):
+    """The pinned version is installed: exactly our pkgrel if we set one, else any."""
     have = run("pacman", "-Q", pkg["name"]).stdout.split()
-    if len(have) == 2 and have[1].startswith(pkg["version"] + "-"):
+    if len(have) != 2:
+        return False
+    if pkg["pkgrel"]:
+        return have[1] == "%s-%s" % (pkg["version"], pkg["pkgrel"])
+    return have[1].startswith(pkg["version"] + "-")
+
+
+def build_aur(pkg, user):
+    """Build a pinned AUR package as the desktop user, with its source patches, and install it."""
+    if installed(pkg):
         say("STEP", "%s %s already installed" % (pkg["name"], pkg["version"]))
         return True
     say("STEP", "Building %s %s (this can take several minutes)…" % (pkg["name"], pkg["version"]))
-    work = tempfile.mkdtemp(prefix="omarchy-remote-access-")
+    # On disk, not /tmp: a Rust build with its fetched crates can outgrow a RAM-backed /tmp.
+    work = tempfile.mkdtemp(prefix="omarchy-remote-access-", dir="/var/tmp")
     os.chown(work, user.pw_uid, user.pw_gid)
     as_user = ["runuser", "-u", user.pw_name, "--"]
     src = os.path.join(work, pkg["name"])
@@ -178,11 +267,29 @@ def build_aur(pkg, user):
         if sha256(os.path.join(src, "PKGBUILD")) != pkg["pkgbuild_sha256"]:
             say("ERROR", "%s build script does not match the reviewed version; not building it" % pkg["name"])
             return False
-        env = {"HOME": user.pw_dir, "PATH": "/usr/bin", "LANG": "C.UTF-8", "PKGDEST": work}
-        if stream(as_user + ["env", *("%s=%s" % kv for kv in env.items()), "makepkg", "--noconfirm"], cwd=src):
+        # Dependencies are fetched into the build folder, never the user's cargo cache.
+        cargo_home = os.path.join(work, "cargo")
+        env = {"HOME": user.pw_dir, "PATH": "/usr/bin", "LANG": "C.UTF-8", "PKGDEST": work,
+               "CARGO_HOME": cargo_home}
+        makepkg = as_user + ["env", *("%s=%s" % kv for kv in env.items()), "makepkg", "--noconfirm"]
+        if pkg["pkgrel"] and not as_user_call(user, set_pkgrel, os.path.join(src, "PKGBUILD"), pkg["pkgrel"]):
+            say("ERROR", "could not prepare %s's build script" % pkg["name"])
+            return False
+        if pkg["patches"]:
+            # Download and prepare, patch what was fetched, then build offline from it.
+            if stream(makepkg + ["--nobuild"], cwd=src):
+                say("ERROR", "downloading %s's sources failed" % pkg["name"])
+                return False
+            if not all(as_user_call(user, apply_patch, p, cargo_home) for p in pkg["patches"]):
+                say("ERROR", "%s sources do not match the reviewed version; not building it" % pkg["name"])
+                return False
+            makepkg.append("--noextract")
+        if stream(makepkg, cwd=src):
             say("ERROR", "building %s failed" % pkg["name"])
             return False
-        built = sorted(f for f in os.listdir(work) if f.startswith(pkg["name"] + "-") and ".pkg.tar" in f)
+        # name-<version>…, never a split package such as name-debug-<version>…
+        built = sorted(f for f in os.listdir(work)
+                       if re.match(re.escape(pkg["name"]) + r"-\d", f) and ".pkg.tar" in f)
         if not built:
             say("ERROR", "no package was produced for %s" % pkg["name"])
             return False
@@ -212,6 +319,7 @@ def cmd_setup(args):
             return 1
     say("STEP", "Installing the helper…")
     os.makedirs(INSTALL_DIR, mode=0o755, exist_ok=True)
+    os.chmod(INSTALL_DIR, 0o755)  # also repairs a folder an earlier setup made 0700
     shutil.copyfile(source, INSTALLED)
     os.chown(INSTALLED, 0, 0)
     os.chmod(INSTALLED, 0o755)
@@ -495,6 +603,9 @@ def main(argv):
     if os.geteuid() != 0:
         say("ERROR", "run through pkexec")
         return 1
+    # pkexec passes on the caller's umask (the backend's is 077); system files must
+    # stay readable, e.g. the helper's folder and the polkit rule.
+    os.umask(0o022)
     cmd = argv[0] if argv else ""
     if cmd == "version":
         print(VERSION)

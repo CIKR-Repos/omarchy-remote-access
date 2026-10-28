@@ -18,6 +18,11 @@ password **once** and:
 - installs what's needed: `hypr-rdp` 0.1.7 (built from the AUR at a pinned,
   reviewed commit), `wayvnc`, `openssh`, `ufw`, `freerdp`, and the remote
   unlock tools;
+- builds `hypr-rdp` with one change to its IronRDP dependency: a connection
+  may buffer at most 1 MiB while waiting for a frame (upstream has no limit,
+  so a client could grow it before signing in). The fetched file is checked
+  against a SHA-256 before and after the change, and the package is
+  installed as `0.1.7-1.1`. The RDP service also runs with a 2 GB memory cap;
 - installs a small root-owned helper with a polkit rule, so after setup the
   firewall and SSH server follow your switches **without asking again**.
   The helper can only open RDP/VNC/SSH ports (22 or 1024 and up) on the
